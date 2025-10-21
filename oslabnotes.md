@@ -576,7 +576,7 @@ dd if=111.bin of=broken_disk_copy.img bs=1 seek=16384 count=16384 conv=notrunc
 
 ### 终于！
 
-![](picture/27.png)  
+![](pictures/27.png)  	
 无需多言了 : )  
 
 ### 彩蛋的一些观察
@@ -639,4 +639,151 @@ read(3, "origin\tgit@gitee.com:pilot_2025/"..., 1024) = 222
 ~~这算是野路子破解法么~~  
 
 重新整理一下，也就是说彩蛋程序执行时，会获取当前路径，然后转到**.git/config**文件中读取**[remote "origin"]**字段，将其与硬编码的2024年试点班学生学号进行比较，从而展现彩蛋。  
+
+***
+
+# LAB3
+
+## 制作分区硬盘
+
+上来首先大体阅读一下整体实验文档，然后开始写。  
+
+文档推荐所有工作都直接用**make xxx**里面的标准方式来，但是步骤1很显然是要自己来手动做一做。根据上一节的经验，那就依然是自动构建的放在build，自己构建的放到上一级，这样能够方便的对比。  
+
+首先**自动构建**，在最后报了错：  
+```
+2025-10-17 01:32:31.471 [DONE] ld kernel.bin
+2025-10-17 01:32:31.476 [PROC] build image disk.img[sudo] liuzt 的密码：
+mount: /tmp/tmp.6QyvrZT800: /dev/loop0p2 is not a block device; try "-o loop".
+       dmesg(1) may have more information after failed mount system call.
+umount: /tmp/tmp.6QyvrZT800: not mounted.
+mount: /tmp/tmp.6QyvrZT800: /dev/loop0p4 is not a block device; try "-o loop".
+       dmesg(1) may have more information after failed mount system call.
+umount: /tmp/tmp.6QyvrZT800: not mounted.
+2025-10-17 01:32:36.058 [DONE] build image disk.img
+```
+
+看样子错的还不少。  
+那还是手动试试吧。  
+
+按照顺序来，到了用**cfdisk**来分区，发现这个界面和装系统时候那个界面好像。按照**part.sfdisk**文件来分。   
+
+分完后，尝试进行初始化，但是发现对p1、p2、p4的初始化都失败了。  
+
+这个情况在群里有同学提出，助教说是回环设备爆掉了，似乎是重启就能好？  
+
+重启后，再次尝试对p1、p2、p4的初始化，这次p1依旧不行，但是2和4都只有警告、没有报错了。  
+并且从注释中可知，我们只用到了2和4，剩下都是图一乐，就不用再深究了，继续往下就好。  
+
+这时候看分区情况：  
+![](pictures/31.png)  
+
+然后编译mbr程序，编译中报错找不到**layout.inc**，但是有一个**layout.inc.in**，看手册中的有关部分，原来是头文件还需另外配置。折腾一番，写成`nasm -I build/include/ -I include/bootloader/ src/boot/mbr.asm -o mbr.bin`就能自己搞出mbr.bin了。  
+
+可知要把mbr写进磁盘的第0个扇区，就在0-445，这个好，不用怕像boot一样写到错误的地方了。  
+
+写入后挂载、运行，结果与预期一致：  
+![](pictures/32.png)  
+
+## 修改MBR程序
+
+接下来就得继续再改MBR程序，来满足不同需求。那么我的方针依旧是先看懂，再修改。  
+
++ **cld**+**rep movsb**组合：**cld**是用来清除方向标志位，让字符串操作按地址从低到高来处理，而**rep movsb**则是根据CX的值不断把[DS:SI]中的字节搬到[ES:DI]，因此**组合起来**后的语义就变为了**复制CX个字节，从DS:SI到ES:DI**处。  
+
+这次的框架比较简单，所以很快就能着手修改。  
+
+### 显示四大分区有关数据
+
+这里出的大bug是由于内存分配不合理，导致中断向量表被覆盖。  
+最后参考[这篇文章](https://blog.csdn.net/m0_51174487/article/details/127307181)来把理清了内存布局。  
+
+效果如下：  
+![](pictures/33.png)  
+
+### 搜索并启动第一个活动主分区
+
+这里应该要用到分区状态和分区所占扇区数目了。  
+
+这应该不难，但是似乎我写的有点多，编译时候显示`src/boot/mbr.asm:308: error: TIMES value -33 is negative`，得简化一下……  
+
+简化后又带来许多bug，于是再debug半天。  
+
+最后终于是能找到了，但因为没有烧录boot，所以显示的是没有bootable。  
+![](pictures/34.png)  
+
+于是就又要弄烧录镜像，实在不想手动了，就按照手册用make命令。但是又开始报错了，挂载不上，那么只好重启了……  
+
+结果发现重启也没用。依旧挂不上，真就只好自己来。  
+那就先空着吧？因为能到这里，说明就只差一个boot了。  
+
+不行，还得搞一下。成了，见我的小文档：  
+![](pictures/35.png)  
+
+### 让boot.asm打印所在主分区序号
+
+调试一下，发现我在MBR中把主分区序号放到了cx，并且跳过来够cx的值并没有变，所以直接打印cx中的值就行（当然要按照ASCLL码来）  
+![](pictures/36.png)  
+
+然后是修改分区表，我是采用的修改**part.sfdisk**文件，把**disk.img2**改为`disk.img2: start=4096, size=2880, type=4`，然后再次尝试，解决一个bug（因为发现cx实际上不是分区号，而是读取的扇区数，通过一个push和pop就可以解决）后，就能正常了：  
+![](pictures/37.png)  
+
+## 修改boot.asm程序完成内核启动
+
+这里其实在完成上述过程中就已经注意到要补全驱动号与起始LBA，将其补全即可：  
+![](pictures/38.png)  
+
+这里有一点，就是boot在我实现上面的打印主分区序号的情况下是写不下赋值语句的，所以只好将其注释掉……  
+
+然后接下来就只要用GDB观察实现过程即可。  
+试着结合loader的代码，用GDB调试，发现这次的loader是格外的复杂，大概看到加载进实模式后就已经晕头转向了。哎，任重道远啊，继续先往下吧……  
+
+## 修改kprintf.asm
+
+### 明白要干什么
+
+一开始完全不知道究竟该干什么，阅读手册后也是迷迷糊糊。  
+
+但还是硬着头开始编。  
+
+一些踩的坑：  
++ 栈会以**4字节**对齐
++ inc可以替代add 1来自增
++ 栈传参要谨慎使用pushad和popad，有把自己绕晕的风险
+
+### NWPU显示
+
+经过痛苦的debug，调通了：  
+![](pictures/39.png)  
+
+### 显示十四行诗
+
+那么接着往下看，发现显示十四行诗也太慢了，单步执行就到猴年马月了，断点也不好打，所以干脆直接跑：  
+![](pictures/40.png)  
+
+基本正常，可是有一大坨报错，这咋回事？  
+发现是在**cstart**中有一个**unreachable()**，F12全局搜索不到定义，奇了怪了。那么全局搜索文本，发现这原来不是函数，而是一个宏定义：  
+![](pictures/41png)  
+
+原型是`#define panic(msg) _panic(__FILE__, __FUNCTION__, MH_STRINGIFY(__LINE__), msg)`，所以这其实是一个正常报错。  
+
+### 先跳过%s，先看cmatrix的那个接口
+
+发现没啥特别的，直接调用就行，就只需要多include一下。  
+
+好玩，牛b！  
+![](pictures/42.png)  
+
+### 完成%s的配置
+
+这里需要对结构体内部对齐、栈对齐有深刻认识，但我并不熟悉，写了一会发现一直出不来，只好再debug一下。  
+
+最后通过`x/32xd $esp`命令来检查栈，才发现其和我想象中不一样：  
+![](pictures/43.png)  
+具体细节放代码里。  
+
+然后再写，就能行了：  
+![](pictures/44.png)  
+
+
 
